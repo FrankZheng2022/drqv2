@@ -110,7 +110,7 @@ class MetersGroup(object):
         for key, disp_key, ty in self._formating:
             value = data.get(key, 0)
             pieces.append(self._format(disp_key, value, ty))
-        print(' | '.join(pieces))
+        print(' | '.join(pieces), flush=True)
 
     def dump(self, step, prefix):
         if len(self._meters) == 0:
