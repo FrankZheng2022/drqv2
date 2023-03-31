@@ -30,6 +30,7 @@ experiment: exp
 # agent
 lr: 1e-4
 feature_dim: 50
+exp_name: default
 
 agent:
   _target_: drqv2.DrQV2Agent
@@ -48,7 +49,7 @@ agent:
 
 hydra:
   run:
-    dir: ./exp_local/${now:%Y.%m.%d}/${now:%H%M%S}_${hydra.job.override_dirname}
+    dir: ./exp_local/${exp_name}
   sweep:
     dir: ./exp/${now:%Y.%m.%d}/${now:%H%M}_${agent_cfg.experiment}
     subdir: ${hydra.job.num}
