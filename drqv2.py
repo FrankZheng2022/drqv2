@@ -46,7 +46,7 @@ class RandomShiftsAug(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, obs_shape):
+    def __init__(self, obs_shape, feature_dim):
         super().__init__()
 
         assert len(obs_shape) == 3
@@ -57,7 +57,7 @@ class Encoder(nn.Module):
                                      nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
                                      nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
                                      nn.ReLU())
-
+        
         self.apply(utils.weight_init)
 
     def forward(self, obs):
@@ -71,15 +71,17 @@ class CLIP(nn.Module):
     Constrastive loss
     """
 
-    def __init__(self, feature_dim, action_shape, hidden_dim, encoder, critic, critic_target, latent_a_dim=10):
+    def __init__(self, repr_dim, feature_dim, action_shape, hidden_dim, encoder, encoder_target, device):
         super(CLIP, self).__init__()
 
-        self.encoder = lambda x: critic.encode(encoder, x)
-        self.encoder_target = lambda x: critic_target.encode(encoder, x)
+        self.encoder = encoder
+        self.encoder_target = encoder_target
+        self.device = device
         
         a_dim = action_shape[0]
+        latent_a_dim = a_dim
         self.proj_sa = nn.Sequential(
-            nn.Linear(feature_dim + a_dim, hidden_dim), 
+            nn.Linear(feature_dim + latent_a_dim, hidden_dim), 
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, feature_dim)
         )
@@ -87,18 +89,22 @@ class CLIP(nn.Module):
         self.proj_ss = nn.Sequential(
             nn.Linear(feature_dim*2, hidden_dim), 
             nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, latent_a_dim)
+            nn.Linear(hidden_dim, a_dim)
         )
         
         self.proj_a = nn.Sequential(
-            nn.Linear(a_dim, latent_a_dim), nn.LayerNorm(latent_a_dim),
-            nn.Tanh()
+            nn.Linear(a_dim, latent_a_dim), 
+            nn.LayerNorm(latent_a_dim), nn.Tanh()
         )
+        
+        self.proj_s = nn.Sequential(nn.Linear(repr_dim, feature_dim),
+                                   nn.LayerNorm(feature_dim), nn.Tanh())
         
         self.W = nn.Parameter(torch.rand(feature_dim, feature_dim))
         self.inv_W = nn.Parameter(torch.rand(latent_a_dim, latent_a_dim))
-
-    def encode(self, x, detach=False, ema=False):
+        self.apply(utils.weight_init)
+    
+    def encode(self, x, ema=False):
         """
         Encoder: z_t = e(x_t)
         :param x: x_t, x y coordinates
@@ -106,12 +112,9 @@ class CLIP(nn.Module):
         """
         if ema:
             with torch.no_grad():
-                z_out = self.encoder_target(x)
+                z_out = self.proj_s(self.encoder_target(x))
         else:
-            z_out = self.encoder(x)
-
-        if detach:
-            z_out = z_out.detach()
+            z_out = self.proj_s(self.encoder(x))
         return z_out
     
     def project_sa(self, s, a):
@@ -121,8 +124,26 @@ class CLIP(nn.Module):
     def project_ss(self, s, next_s):
         x = torch.concat([s, next_s], dim=-1)
         return self.proj_ss(x)
-        
+    
+    ### barlow twins loss
+    def compute_bt(self, z_a, z_b, lambda_param=5e-3):
+        # normalize repr. along the batch dimension
+        z_a_norm = (z_a - z_a.mean(0)) / z_a.std(0) # NxD
+        z_b_norm = (z_b - z_b.mean(0)) / z_b.std(0) # NxD
 
+        N = z_a.size(0)
+        D = z_a.size(1)
+
+        # cross-correlation matrix
+        c = torch.mm(z_a_norm.T, z_b_norm) / N # DxD
+        # loss
+        c_diff = (c - torch.eye(D,device=self.device)).pow(2) # DxD
+        # multiply off-diagonal elems of c_diff by lambda
+        c_diff[~torch.eye(D, dtype=bool)] *= lambda_param
+        loss = c_diff.sum()
+
+        return loss
+        
     def compute_logits(self, z_a, z_pos, inv=False):
         """
         - compute (B,B) matrix z_a (W z_pos.T)
@@ -130,6 +151,7 @@ class CLIP(nn.Module):
         - negatives are all other elements
         - to compute loss use multiclass cross entropy with identity matrix for labels
         """
+        
         W  = self.inv_W if inv else self.W
         Wz = torch.matmul(W, z_pos.T)  # (z_dim,B)
         logits = torch.matmul(z_a, Wz)  # (B,B)
@@ -142,7 +164,7 @@ class Actor(nn.Module):
         super().__init__()
 
         self.trunk = nn.Sequential(nn.Linear(repr_dim, feature_dim),
-                                   nn.LayerNorm(feature_dim), nn.Tanh())
+                                    nn.LayerNorm(feature_dim), nn.Tanh())
 
         self.policy = nn.Sequential(nn.Linear(feature_dim, hidden_dim),
                                     nn.ReLU(inplace=True),
@@ -154,7 +176,6 @@ class Actor(nn.Module):
 
     def forward(self, obs, std):
         h = self.trunk(obs)
-
         mu = self.policy(h)
         mu = torch.tanh(mu)
         std = torch.ones_like(mu) * std
@@ -168,7 +189,7 @@ class Critic(nn.Module):
         super().__init__()
 
         self.trunk = nn.Sequential(nn.Linear(repr_dim, feature_dim),
-                                   nn.LayerNorm(feature_dim), nn.Tanh())
+                                    nn.LayerNorm(feature_dim), nn.Tanh())
 
         self.Q1 = nn.Sequential(
             nn.Linear(feature_dim + action_shape[0], hidden_dim),
@@ -190,25 +211,25 @@ class Critic(nn.Module):
 
         return q1, q2
     
-    def encode(self, encoder, obs):
-        obs = encoder(obs)
-        return self.trunk(obs)
-    
 
 class DrQV2Agent:
     def __init__(self, obs_shape, action_shape, device, lr, feature_dim,
-                 hidden_dim, critic_target_tau, num_expl_steps,
-                 update_every_steps, stddev_schedule, stddev_clip, use_tb):
+                 hidden_dim, critic_target_tau, encoder_tau, num_expl_steps,
+                 update_every_steps, stddev_schedule, stddev_clip, use_tb, ema):
         self.device = device
         self.critic_target_tau = critic_target_tau
+        self.encoder_tau = encoder_tau
         self.update_every_steps = update_every_steps
         self.use_tb = use_tb
         self.num_expl_steps = num_expl_steps
         self.stddev_schedule = stddev_schedule
         self.stddev_clip = stddev_clip
+        self.ema = ema
 
         # models
-        self.encoder = Encoder(obs_shape).to(device)
+        self.encoder = Encoder(obs_shape, feature_dim).to(device)
+        self.encoder_target = Encoder(obs_shape, feature_dim).to(device)
+        self.encoder_target.load_state_dict(self.encoder.state_dict())
         self.actor = Actor(self.encoder.repr_dim, action_shape, feature_dim,
                            hidden_dim).to(device)
 
@@ -217,7 +238,7 @@ class DrQV2Agent:
         self.critic_target = Critic(self.encoder.repr_dim, action_shape,
                                     feature_dim, hidden_dim).to(device)
         self.critic_target.load_state_dict(self.critic.state_dict())
-        self.CLIP = CLIP(feature_dim, action_shape, hidden_dim, self.encoder, self.critic, self.critic_target).to(device)
+        self.CLIP = CLIP(self.encoder.repr_dim, feature_dim, action_shape, hidden_dim, self.encoder, self.encoder_target, device).to(device)
         
         # optimizers
         self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=lr)
@@ -226,19 +247,20 @@ class DrQV2Agent:
         self.clip_opt = torch.optim.Adam(self.CLIP.parameters(), lr=lr)
         
         self.cross_entropy_loss = nn.CrossEntropyLoss()
+        self.mse_loss = nn.MSELoss()
         
         # data augmentation
         self.aug = RandomShiftsAug(pad=4)
 
         self.train()
         self.critic_target.train()
-        self.CLIP.train()
 
     def train(self, training=True):
         self.training = training
         self.encoder.train(training)
         self.actor.train(training)
         self.critic.train(training)
+        self.CLIP.train()
 
     def act(self, obs, step, eval_mode):
         obs = torch.as_tensor(obs, device=self.device)
@@ -312,30 +334,35 @@ class DrQV2Agent:
         obs_anchor = self.aug(obs.float())
         obs_pos = self.aug(obs.float())
         z_a = self.CLIP.encode(obs_anchor)
-        z_pos = self.CLIP.encode(obs_pos, ema=True)
-        next_z = self.CLIP.encode(next_obs, ema=True)
-        curr_za = self.CLIP.project_sa(z_a, action)
-        curr_zz = self.CLIP.project_ss(z_a, next_z)
-        ### Compute loss for consistency 
-        logits = self.CLIP.compute_logits(curr_za, next_z)
-        labels = torch.arange(logits.shape[0]).long().to(self.device)
-        consistency_loss = self.cross_entropy_loss(logits, labels)
-        
-        ### Compute loss for inverse_consistency
-        action = self.CLIP.proj_a(action)
-        logits = self.CLIP.compute_logits(curr_zz, action, inv=True)
-        labels = torch.arange(logits.shape[0]).long().to(self.device)
-        inv_consistency_loss = self.cross_entropy_loss(logits, labels)
-        
+        z_pos = self.CLIP.encode(obs_pos, ema=self.ema)
         ### Compute the original loss for CURL
         logits = self.CLIP.compute_logits(z_a, z_pos)
         labels = torch.arange(logits.shape[0]).long().to(self.device)
         curl_loss = self.cross_entropy_loss(logits, labels)
         
+        ### Compute loss for consistency
+        with torch.no_grad():
+            next_obs = self.aug(next_obs.float())
+            next_z = self.CLIP.encode(next_obs, ema=self.ema)
+        action_en = self.CLIP.proj_a(action)
+        curr_za = self.CLIP.project_sa(z_a, action_en) 
+        logits = self.CLIP.compute_logits(curr_za, next_z)
+        labels = torch.arange(logits.shape[0]).long().to(self.device)
+        consistency_loss = self.cross_entropy_loss(logits, labels)
+        #consistency_loss = self.CLIP.compute_bt(curr_za, next_z)
+        
+        ### Compute loss for inverse_prediction
+        pred_action = self.CLIP.project_ss(z_a, next_z)
+        inv_consistency_loss = self.mse_loss(pred_action, action)
+        #logits = self.CLIP.compute_logits(curr_zz, action, inv=True)
+        #labels = torch.arange(logits.shape[0]).long().to(self.device)
+        #inv_consistency_loss = self.cross_entropy_loss(logits, labels)
+        
         self.encoder_opt.zero_grad()
         self.clip_opt.zero_grad()
-        (inv_consistency_loss + consistency_loss + curl_loss).backward()
-
+        #(inv_consistency_loss + consistency_loss + curl_loss).backward()
+        (consistency_loss + curl_loss).backward()
+        
         self.encoder_opt.step()
         self.clip_opt.step()
         if self.use_tb:
@@ -362,7 +389,10 @@ class DrQV2Agent:
         # encode
         obs_en = self.encoder(obs_en)
         with torch.no_grad():
-            next_obs_en = self.encoder(next_obs_en)
+            if self.ema:
+                next_obs_en = self.encoder_target(next_obs_en)
+            else:
+                next_obs_en = self.encoder(next_obs_en)
 
         if self.use_tb:
             metrics['batch_reward'] = reward.mean().item()
@@ -377,7 +407,10 @@ class DrQV2Agent:
         # update critic target
         utils.soft_update_params(self.critic, self.critic_target,
                                  self.critic_target_tau)
+        # update critic target
+        utils.soft_update_params(self.encoder, self.encoder_target,
+                                 self.encoder_tau)
         
-        # metrics.update(self.update_clip(obs, action, r_next_obs))
+        metrics.update(self.update_clip(obs, action, r_next_obs))
         
         return metrics
