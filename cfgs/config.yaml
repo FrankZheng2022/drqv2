@@ -33,6 +33,8 @@ feature_dim: 50
 exp_name: default
 encoder_tau: 0.05
 ema: false
+loss_type: cpc
+inv: false
 
 agent:
   _target_: drqv2.DrQV2Agent
@@ -50,6 +52,9 @@ agent:
   stddev_schedule: ${stddev_schedule}
   stddev_clip: 0.3
   ema: ${ema}
+  loss_type: ${loss_type}
+  inv: ${inv}
+
 
 hydra:
   run:
