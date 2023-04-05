@@ -31,6 +31,8 @@ experiment: exp
 lr: 1e-4
 feature_dim: 50
 exp_name: default
+encoder_tau: 0.05
+ema: false
 
 agent:
   _target_: drqv2.DrQV2Agent
@@ -39,6 +41,7 @@ agent:
   device: ${device}
   lr: ${lr}
   critic_target_tau: 0.01
+  encoder_tau: ${encoder_tau}
   update_every_steps: 2
   use_tb: ${use_tb}
   num_expl_steps: 2000
@@ -46,6 +49,7 @@ agent:
   feature_dim: ${feature_dim}
   stddev_schedule: ${stddev_schedule}
   stddev_clip: 0.3
+  ema: ${ema}
 
 hydra:
   run:
