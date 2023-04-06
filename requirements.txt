@@ -1,3 +1,5 @@
+termcolor==1.1.0
+tb-nightly
 imageio==2.9.0
 image-ffmpeg==0.4.4
 hydra-core=1.1.0
