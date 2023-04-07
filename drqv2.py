@@ -379,7 +379,6 @@ class DrQV2Agent:
         self.encoder_opt.zero_grad()
         self.clip_opt.zero_grad()
         (inv_consistency_loss + consistency_loss + curl_loss + reward_loss).backward()
-        
         self.encoder_opt.step()
         self.clip_opt.step()
         if self.use_tb:

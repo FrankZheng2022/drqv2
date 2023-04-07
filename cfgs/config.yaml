@@ -55,7 +55,6 @@ agent:
   ema: ${ema}
   loss_type: ${loss_type}
   inv: ${inv}
-  #multinv: ${inv}
 
 
 hydra:
