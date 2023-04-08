@@ -71,11 +71,10 @@ class CLIP(nn.Module):
     Constrastive loss
     """
 
-    def __init__(self, repr_dim, feature_dim, action_shape, hidden_dim, encoder, encoder_target, device):
+    def __init__(self, repr_dim, feature_dim, action_shape, hidden_dim, encoder, device):
         super(CLIP, self).__init__()
 
         self.encoder = encoder
-        self.encoder_target = encoder_target
         self.device = device
         
         a_dim = action_shape[0]
@@ -101,7 +100,7 @@ class CLIP(nn.Module):
                                    nn.LayerNorm(feature_dim), nn.Tanh())
         
         self.reward = nn.Sequential(
-            nn.Linear(feature_dim + latent_a_dim, hidden_dim), 
+            nn.Linear(feature_dim, hidden_dim), 
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, 1)
         )
@@ -118,7 +117,7 @@ class CLIP(nn.Module):
         """
         if ema:
             with torch.no_grad():
-                z_out = self.proj_s(self.encoder_target(x))
+                z_out = self.proj_s(self.encoder(x))
         else:
             z_out = self.proj_s(self.encoder(x))
         return z_out
@@ -130,25 +129,6 @@ class CLIP(nn.Module):
     def project_ss(self, s, next_s):
         x = torch.concat([s, next_s], dim=-1)
         return self.proj_ss(x)
-    
-    ### barlow twins loss
-    def compute_bt(self, z_a, z_b, lambda_param=5e-3):
-        # normalize repr. along the batch dimension
-        z_a_norm = (z_a - z_a.mean(0)) / z_a.std(0) # NxD
-        z_b_norm = (z_b - z_b.mean(0)) / z_b.std(0) # NxD
-
-        N = z_a.size(0)
-        D = z_a.size(1)
-
-        # cross-correlation matrix
-        c = torch.mm(z_a_norm.T, z_b_norm) / N # DxD
-        # loss
-        c_diff = (c - torch.eye(D,device=self.device)).pow(2) # DxD
-        # multiply off-diagonal elems of c_diff by lambda
-        c_diff[~torch.eye(D, dtype=bool)] *= lambda_param
-        loss = c_diff.sum()
-
-        return loss
         
     def compute_logits(self, z_a, z_pos, inv=False):
         """
@@ -220,24 +200,22 @@ class Critic(nn.Module):
 
 class DrQV2Agent:
     def __init__(self, obs_shape, action_shape, device, lr, feature_dim,
-                 hidden_dim, critic_target_tau, encoder_tau, num_expl_steps,
-                 update_every_steps, stddev_schedule, stddev_clip, use_tb, ema, loss_type, inv):
+                 hidden_dim, critic_target_tau, num_expl_steps,
+                 update_every_steps, stddev_schedule, stddev_clip, use_tb,
+                 inv, reward):
         self.device = device
         self.critic_target_tau = critic_target_tau
-        self.encoder_tau = encoder_tau
         self.update_every_steps = update_every_steps
         self.use_tb = use_tb
         self.num_expl_steps = num_expl_steps
         self.stddev_schedule = stddev_schedule
         self.stddev_clip = stddev_clip
-        self.ema = ema
-        self.loss_type = loss_type
-        self.inv = inv
+        
+        self.inv = inv 
+        self.reward = reward
 
         # models
         self.encoder = Encoder(obs_shape, feature_dim).to(device)
-        self.encoder_target = Encoder(obs_shape, feature_dim).to(device)
-        self.encoder_target.load_state_dict(self.encoder.state_dict())
         self.actor = Actor(self.encoder.repr_dim, action_shape, feature_dim,
                            hidden_dim).to(device)
 
@@ -246,7 +224,7 @@ class DrQV2Agent:
         self.critic_target = Critic(self.encoder.repr_dim, action_shape,
                                     feature_dim, hidden_dim).to(device)
         self.critic_target.load_state_dict(self.critic.state_dict())
-        self.CLIP = CLIP(self.encoder.repr_dim, feature_dim, action_shape, hidden_dim, self.encoder, self.encoder_target, device).to(device)
+        self.CLIP = CLIP(self.encoder.repr_dim, feature_dim, action_shape, hidden_dim, self.encoder, device).to(device)
         
         # optimizers
         self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=lr)
@@ -342,32 +320,19 @@ class DrQV2Agent:
         obs_anchor = self.aug(obs.float())
         obs_pos = self.aug(obs.float())
         z_a = self.CLIP.encode(obs_anchor)
-        z_pos = self.CLIP.encode(obs_pos, ema=self.ema)
-        if self.loss_type == 'bt':
-            curl_loss = self.CLIP.compute_bt(z_a, z_pos)
-        else:
-            ### Compute the original loss for CURL
-            logits = self.CLIP.compute_logits(z_a, z_pos)
-            labels = torch.arange(logits.shape[0]).long().to(self.device)
-            curl_loss = self.cross_entropy_loss(logits, labels)
+        z_pos = self.CLIP.encode(obs_pos, ema=True)
+        ### Compute the original loss for CURL
+        logits = self.CLIP.compute_logits(z_a, z_pos)
+        labels = torch.arange(logits.shape[0]).long().to(self.device)
+        curl_loss = self.cross_entropy_loss(logits, labels)
         
         ### Compute loss for consistency
-        with torch.no_grad():
-            next_obs = self.aug(next_obs.float())
-            next_z = self.CLIP.encode(next_obs, ema=self.ema)
-        
+        next_z = self.CLIP.encode(self.aug(next_obs.float()), ema=True)
         action_en = self.CLIP.proj_a(action)
-        curr_za = self.CLIP.project_sa(z_a, action_en)
-        if self.loss_type == 'bt':
-            consistency_loss = self.CLIP.compute_bt(curr_za, next_z)
-        else:
-            logits = self.CLIP.compute_logits(curr_za, next_z)
-            labels = torch.arange(logits.shape[0]).long().to(self.device)
-            consistency_loss = self.cross_entropy_loss(logits, labels)
-        
-        ### compute reward loss
-        reward_pred = self.CLIP.reward(torch.concat([z_a, action_en],dim=-1))
-        reward_loss = self.mse_loss(reward_pred, reward)
+        curr_za = self.CLIP.project_sa(z_a, action_en) 
+        logits = self.CLIP.compute_logits(curr_za, next_z)
+        labels = torch.arange(logits.shape[0]).long().to(self.device)
+        consistency_loss = self.cross_entropy_loss(logits, labels)
         
         ### Compute loss for inverse_prediction
         if self.inv:
@@ -375,7 +340,13 @@ class DrQV2Agent:
             inv_consistency_loss = self.mse_loss(pred_action, action)
         else:
             inv_consistency_loss = torch.tensor(0.)
-        
+            
+        if self.reward:
+            reward_pred = self.CLIP.reward(curr_za)
+            reward_loss = self.mse_loss(reward_pred, reward)
+        else:
+            reward_loss = torch.tensor(0.)
+            
         self.encoder_opt.zero_grad()
         self.clip_opt.zero_grad()
         (inv_consistency_loss + consistency_loss + curl_loss + reward_loss).backward()
@@ -384,8 +355,8 @@ class DrQV2Agent:
         if self.use_tb:
             metrics['curl_loss'] = curl_loss.item()
             metrics['fwd_loss']  = consistency_loss.item()
-            metrics['inv_loss']  = inv_consistency_loss.item()
             metrics['reward_loss']  = reward_loss.item()
+            metrics['inv_loss']  = inv_consistency_loss.item()
         return metrics
         
         
@@ -421,10 +392,7 @@ class DrQV2Agent:
         # update critic target
         utils.soft_update_params(self.critic, self.critic_target,
                                  self.critic_target_tau)
-        # update critic target
-        utils.soft_update_params(self.encoder, self.encoder_target,
-                                 self.encoder_tau)
-        if self.loss_type in ['bt', 'cpc']:
-            metrics.update(self.update_clip(obs, action, r_next_obs, reward))
+        
+        metrics.update(self.update_clip(obs, action, r_next_obs, reward))
         
         return metrics
