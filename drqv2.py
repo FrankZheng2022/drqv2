@@ -344,7 +344,7 @@ class DrQV2Agent:
         
         if self.temporal:
             batch = torch.concat([z_a, action, next_z], dim=-1)
-            batch_rev = torch.concat([next_z, action, z_a], dim=-1)
+            batch_rev = torch.concat([next_z, action_en, z_a], dim=-1)
             labels = torch.concat([torch.zeros(batch.shape[0]),
                                    torch.ones(batch.shape[0])]
                                  ).long().to(self.device)
@@ -411,6 +411,7 @@ class DrQV2Agent:
         utils.soft_update_params(self.critic, self.critic_target,
                                  self.critic_target_tau)
         
-        metrics.update(self.update_clip(obs, action, r_next_obs, reward))
+        #metrics.update(self.update_clip(obs, action, r_next_obs, reward))
+        metrics.update(self.update_clip(obs, action, next_obs, reward))
         
         return metrics
