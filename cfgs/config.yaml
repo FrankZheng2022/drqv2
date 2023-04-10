@@ -33,7 +33,7 @@ encoder_lr: 2e-4
 feature_dim: 50
 exp_name: default
 inv: false
-reward: false
+reward: true
 temporal: false
 
 agent:
