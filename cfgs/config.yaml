@@ -29,10 +29,12 @@ use_tb: true
 experiment: exp
 # agent
 lr: 1e-4
+encoder_lr: 2e-4
 feature_dim: 50
 exp_name: default
 inv: false
 reward: false
+temporal: false
 
 agent:
   _target_: drqv2.DrQV2Agent
@@ -40,6 +42,7 @@ agent:
   action_shape: ??? # to be specified later
   device: ${device}
   lr: ${lr}
+  encoder_lr: ${encoder_lr}
   critic_target_tau: 0.01
   update_every_steps: 2
   use_tb: ${use_tb}
@@ -50,6 +53,7 @@ agent:
   stddev_clip: 0.3
   inv: ${inv}
   reward: ${reward}
+  temporal: ${temporal}
 
 
 hydra:

@@ -99,8 +99,14 @@ class CLIP(nn.Module):
         self.proj_s = nn.Sequential(nn.Linear(repr_dim, feature_dim),
                                    nn.LayerNorm(feature_dim), nn.Tanh())
         
+        self.proj_sas = nn.Sequential(
+            nn.Linear(feature_dim*2+a_dim, hidden_dim), 
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, 2)
+        )
+        
         self.reward = nn.Sequential(
-            nn.Linear(feature_dim, hidden_dim), 
+            nn.Linear(feature_dim+a_dim, hidden_dim), 
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, 1)
         )
@@ -199,10 +205,10 @@ class Critic(nn.Module):
     
 
 class DrQV2Agent:
-    def __init__(self, obs_shape, action_shape, device, lr, feature_dim,
+    def __init__(self, obs_shape, action_shape, device, lr, encoder_lr, feature_dim,
                  hidden_dim, critic_target_tau, num_expl_steps,
                  update_every_steps, stddev_schedule, stddev_clip, use_tb,
-                 inv, reward):
+                 inv, reward, temporal):
         self.device = device
         self.critic_target_tau = critic_target_tau
         self.update_every_steps = update_every_steps
@@ -213,6 +219,7 @@ class DrQV2Agent:
         
         self.inv = inv 
         self.reward = reward
+        self.temporal = temporal
 
         # models
         self.encoder = Encoder(obs_shape, feature_dim).to(device)
@@ -230,7 +237,7 @@ class DrQV2Agent:
         self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=lr)
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=lr)
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=lr)
-        self.clip_opt = torch.optim.Adam(self.CLIP.parameters(), lr=lr)
+        self.clip_opt = torch.optim.Adam(self.CLIP.parameters(), lr=encoder_lr)
         
         self.cross_entropy_loss = nn.CrossEntropyLoss()
         self.mse_loss = nn.MSELoss()
@@ -334,6 +341,19 @@ class DrQV2Agent:
         labels = torch.arange(logits.shape[0]).long().to(self.device)
         consistency_loss = self.cross_entropy_loss(logits, labels)
         
+        
+        if self.temporal:
+            batch = torch.concat([z_a, action, next_z], dim=-1)
+            batch_rev = torch.concat([next_z, action, z_a], dim=-1)
+            labels = torch.concat([torch.zeros(batch.shape[0]),
+                                   torch.ones(batch.shape[0])]
+                                 ).long().to(self.device)
+            batch  = torch.concat([batch, batch_rev], dim=0)
+            logits = self.CLIP.proj_sas(batch)
+            temporal_loss = self.cross_entropy_loss(logits, labels)
+        else:
+            temporal_loss = torch.tensor(0.)
+        
         ### Compute loss for inverse_prediction
         if self.inv:
             pred_action = self.CLIP.project_ss(z_a, next_z)
@@ -342,20 +362,19 @@ class DrQV2Agent:
             inv_consistency_loss = torch.tensor(0.)
             
         if self.reward:
-            reward_pred = self.CLIP.reward(curr_za)
+            reward_pred = self.CLIP.reward(torch.concat([z_a, action], dim=-1))
             reward_loss = self.mse_loss(reward_pred, reward)
         else:
             reward_loss = torch.tensor(0.)
             
-        self.encoder_opt.zero_grad()
         self.clip_opt.zero_grad()
-        (inv_consistency_loss + consistency_loss + curl_loss + reward_loss).backward()
-        self.encoder_opt.step()
+        (inv_consistency_loss + consistency_loss + curl_loss + reward_loss + temporal_loss).backward()
         self.clip_opt.step()
         if self.use_tb:
             metrics['curl_loss'] = curl_loss.item()
             metrics['fwd_loss']  = consistency_loss.item()
             metrics['reward_loss']  = reward_loss.item()
+            metrics['temporal_loss']  = temporal_loss.item()
             metrics['inv_loss']  = inv_consistency_loss.item()
         return metrics
         
@@ -363,10 +382,9 @@ class DrQV2Agent:
     
     def update(self, replay_iter, step):
         metrics = dict()
-
         if step % self.update_every_steps != 0:
             return metrics
-
+        
         batch = next(replay_iter)
         obs, action, reward, discount, next_obs, r_next_obs = utils.to_torch(
             batch, self.device)
@@ -378,7 +396,7 @@ class DrQV2Agent:
         obs_en = self.encoder(obs_en)
         with torch.no_grad():
             next_obs_en = self.encoder(next_obs_en)
-
+        
         if self.use_tb:
             metrics['batch_reward'] = reward.mean().item()
 
