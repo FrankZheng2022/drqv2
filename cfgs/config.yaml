@@ -35,6 +35,7 @@ exp_name: default
 inv: false
 reward: true
 temporal: false
+multistep: false
 
 agent:
   _target_: drqv2.DrQV2Agent
@@ -54,6 +55,7 @@ agent:
   inv: ${inv}
   reward: ${reward}
   temporal: ${temporal}
+  multistep: ${multistep}
 
 
 hydra:

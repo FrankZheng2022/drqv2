@@ -208,7 +208,7 @@ class DrQV2Agent:
     def __init__(self, obs_shape, action_shape, device, lr, encoder_lr, feature_dim,
                  hidden_dim, critic_target_tau, num_expl_steps,
                  update_every_steps, stddev_schedule, stddev_clip, use_tb,
-                 inv, reward, temporal):
+                 inv, reward, temporal, multistep):
         self.device = device
         self.critic_target_tau = critic_target_tau
         self.update_every_steps = update_every_steps
@@ -220,6 +220,7 @@ class DrQV2Agent:
         self.inv = inv 
         self.reward = reward
         self.temporal = temporal
+        self.multistep = multistep
 
         # models
         self.encoder = Encoder(obs_shape, feature_dim).to(device)
@@ -411,7 +412,9 @@ class DrQV2Agent:
         utils.soft_update_params(self.critic, self.critic_target,
                                  self.critic_target_tau)
         
-        #metrics.update(self.update_clip(obs, action, r_next_obs, reward))
-        metrics.update(self.update_clip(obs, action, next_obs, reward))
+        if self.multistep:
+            metrics.update(self.update_clip(obs, action, next_obs, reward))
+        else:
+            metrics.update(self.update_clip(obs, action, r_next_obs, reward))
         
         return metrics
