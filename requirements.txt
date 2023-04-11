@@ -13,3 +13,4 @@ opencv-python==4.5.3.56
 jupyterlab
 scikit-image
 dm_control
+gym
