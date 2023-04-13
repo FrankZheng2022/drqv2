@@ -101,7 +101,7 @@ class CLIP(nn.Module):
                                    nn.LayerNorm(feature_dim), nn.Tanh())
         
         self.proj_sas = nn.Sequential(
-            nn.Linear(feature_dim*2+a_dim, hidden_dim), 
+            nn.Linear(feature_dim*2+latent_a_dim, hidden_dim), 
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, 2)
         )
