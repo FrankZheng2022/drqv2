@@ -79,8 +79,8 @@ class ReplayBufferStorage:
 
 
 class ReplayBuffer(IterableDataset):
-    def __init__(self, replay_dir, max_size, num_workers, nstep, discount,
-                 fetch_every, save_snapshot):
+    def __init__(self, replay_dir, max_size, num_workers, nstep,  multistep, 
+                 discount, fetch_every, save_snapshot):
         self._replay_dir = replay_dir
         self._size = 0
         self._max_size = max_size
@@ -92,6 +92,7 @@ class ReplayBuffer(IterableDataset):
         self._fetch_every = fetch_every
         self._samples_since_last_fetch = fetch_every
         self._save_snapshot = save_snapshot
+        self._multistep = multistep
 
     def _sample_episode(self):
         eps_fn = random.choice(self._episode_fns)
@@ -150,9 +151,9 @@ class ReplayBuffer(IterableDataset):
         # add +1 for the first dummy transition
         idx = np.random.randint(0, episode_len(episode) - self._nstep + 1) + 1
         obs = episode['observation'][idx - 1]
-        r_next_obs = episode['observation'][idx]
+        r_next_obs = episode['observation'][idx + self._multistep - 1]
         action = episode['action'][idx]
-        action_seq
+        action_seq = np.concatenate([episode['action'][idx+i] for i in range(self._multistep)])
         next_obs = episode['observation'][idx + self._nstep - 1]
         reward = np.zeros_like(episode['reward'][idx])
         discount = np.ones_like(episode['discount'][idx])
@@ -160,7 +161,7 @@ class ReplayBuffer(IterableDataset):
             step_reward = episode['reward'][idx + i]
             reward += discount * step_reward
             discount *= episode['discount'][idx + i] * self._discount
-        return (obs, action, reward, discount, next_obs, r_next_obs)
+        return (obs, action, action_seq, reward, discount, next_obs, r_next_obs)
 
     def __iter__(self):
         while True:
@@ -174,13 +175,14 @@ def _worker_init_fn(worker_id):
 
 
 def make_replay_loader(replay_dir, max_size, batch_size, num_workers,
-                       save_snapshot, nstep, discount):
+                       save_snapshot, nstep, multistep, discount):
     max_size_per_worker = max_size // max(1, num_workers)
 
     iterable = ReplayBuffer(replay_dir,
                             max_size_per_worker,
                             num_workers,
                             nstep,
+                            multistep,
                             discount,
                             fetch_every=1000,
                             save_snapshot=save_snapshot)
@@ -191,6 +193,8 @@ def make_replay_loader(replay_dir, max_size, batch_size, num_workers,
                                          pin_memory=True,
                                          worker_init_fn=_worker_init_fn)
     return loader
+
+
 
 
 
