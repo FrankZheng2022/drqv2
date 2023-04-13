@@ -79,7 +79,7 @@ class CLIP(nn.Module):
         self.device = device
         
         a_dim = action_shape[0]
-        latent_a_dim = a_dim*3 if multistep else a_dim
+        latent_a_dim = a_dim*multistep
         self.proj_sa = nn.Sequential(
             nn.Linear(feature_dim + latent_a_dim, hidden_dim), 
             nn.ReLU(inplace=True),
@@ -92,16 +92,10 @@ class CLIP(nn.Module):
             nn.Linear(hidden_dim, a_dim)
         )
         
-        if self.multistep:
-            self.proj_a = nn.Sequential(
-                nn.Linear(a_dim*3, latent_a_dim), 
-                nn.LayerNorm(latent_a_dim), nn.Tanh()
-            )
-        else:
-            self.proj_a = nn.Sequential(
-                nn.Linear(a_dim, latent_a_dim), 
-                nn.LayerNorm(latent_a_dim), nn.Tanh()
-            )
+        self.proj_a = nn.Sequential(
+            nn.Linear(a_dim*self.multistep, latent_a_dim), 
+            nn.LayerNorm(latent_a_dim), nn.Tanh()
+        )
         
         self.proj_s = nn.Sequential(nn.Linear(repr_dim, feature_dim),
                                    nn.LayerNorm(feature_dim), nn.Tanh())
@@ -347,10 +341,7 @@ class DrQV2Agent:
         
         ### Compute loss for consistency
         next_z = self.CLIP.encode(self.aug(next_obs.float()), ema=True)
-        if self.multistep:
-            action_en = self.CLIP.proj_a(action_seq)
-        else:
-            action_en = self.CLIP.proj_a(action)
+        action_en = self.CLIP.proj_a(action_seq)
         curr_za = self.CLIP.project_sa(z_a, action_en) 
         logits = self.CLIP.compute_logits(curr_za, next_z)
         labels = torch.arange(logits.shape[0]).long().to(self.device)
@@ -426,9 +417,6 @@ class DrQV2Agent:
         utils.soft_update_params(self.critic, self.critic_target,
                                  self.critic_target_tau)
         
-        if self.multistep:
-            metrics.update(self.update_clip(obs, action, action_seq, next_obs, reward))
-        else:
-            metrics.update(self.update_clip(obs, action, action_seq, r_next_obs, reward))
+        metrics.update(self.update_clip(obs, action, action_seq, r_next_obs, reward))
         
         return metrics
