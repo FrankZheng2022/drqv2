@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+from lars import LARS
 import utils
 
 
@@ -71,14 +71,15 @@ class CLIP(nn.Module):
     Constrastive loss
     """
 
-    def __init__(self, repr_dim, feature_dim, action_shape, hidden_dim, encoder, device):
+    def __init__(self, repr_dim, feature_dim, action_shape, hidden_dim, encoder, multistep, device):
         super(CLIP, self).__init__()
 
+        self.multistep = multistep
         self.encoder = encoder
         self.device = device
         
         a_dim = action_shape[0]
-        latent_a_dim = a_dim
+        latent_a_dim = a_dim*3 if multistep else a_dim
         self.proj_sa = nn.Sequential(
             nn.Linear(feature_dim + latent_a_dim, hidden_dim), 
             nn.ReLU(inplace=True),
@@ -91,10 +92,16 @@ class CLIP(nn.Module):
             nn.Linear(hidden_dim, a_dim)
         )
         
-        self.proj_a = nn.Sequential(
-            nn.Linear(a_dim, latent_a_dim), 
-            nn.LayerNorm(latent_a_dim), nn.Tanh()
-        )
+        if self.multistep:
+            self.proj_a = nn.Sequential(
+                nn.Linear(a_dim*3, latent_a_dim), 
+                nn.LayerNorm(latent_a_dim), nn.Tanh()
+            )
+        else:
+            self.proj_a = nn.Sequential(
+                nn.Linear(a_dim, latent_a_dim), 
+                nn.LayerNorm(latent_a_dim), nn.Tanh()
+            )
         
         self.proj_s = nn.Sequential(nn.Linear(repr_dim, feature_dim),
                                    nn.LayerNorm(feature_dim), nn.Tanh())
@@ -208,7 +215,7 @@ class DrQV2Agent:
     def __init__(self, obs_shape, action_shape, device, lr, encoder_lr, feature_dim,
                  hidden_dim, critic_target_tau, num_expl_steps,
                  update_every_steps, stddev_schedule, stddev_clip, use_tb,
-                 inv, reward, temporal, multistep):
+                 inv, reward, temporal, multistep, lars):
         self.device = device
         self.critic_target_tau = critic_target_tau
         self.update_every_steps = update_every_steps
@@ -221,6 +228,7 @@ class DrQV2Agent:
         self.reward = reward
         self.temporal = temporal
         self.multistep = multistep
+        self.lars = lars
 
         # models
         self.encoder = Encoder(obs_shape, feature_dim).to(device)
@@ -232,13 +240,16 @@ class DrQV2Agent:
         self.critic_target = Critic(self.encoder.repr_dim, action_shape,
                                     feature_dim, hidden_dim).to(device)
         self.critic_target.load_state_dict(self.critic.state_dict())
-        self.CLIP = CLIP(self.encoder.repr_dim, feature_dim, action_shape, hidden_dim, self.encoder, device).to(device)
+        self.CLIP = CLIP(self.encoder.repr_dim, feature_dim, action_shape, hidden_dim, self.encoder, multistep, device).to(device)
         
         # optimizers
         self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=lr)
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=lr)
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=lr)
-        self.clip_opt = torch.optim.Adam(self.CLIP.parameters(), lr=encoder_lr)
+        if lars:
+            self.clip_opt = LARS(self.CLIP.parameters(), lr=encoder_lr, momentum=0.9)
+        else:
+            self.clip_opt = torch.optim.Adam(self.CLIP.parameters(), lr=encoder_lr)
         
         self.cross_entropy_loss = nn.CrossEntropyLoss()
         self.mse_loss = nn.MSELoss()
@@ -322,7 +333,7 @@ class DrQV2Agent:
 
         return metrics
     
-    def update_clip(self, obs, action, next_obs, reward):
+    def update_clip(self, obs, action, action_seq, next_obs, reward):
         metrics = dict()
         
         obs_anchor = self.aug(obs.float())
@@ -336,7 +347,10 @@ class DrQV2Agent:
         
         ### Compute loss for consistency
         next_z = self.CLIP.encode(self.aug(next_obs.float()), ema=True)
-        action_en = self.CLIP.proj_a(action)
+        if self.multistep:
+            action_en = self.CLIP.proj_a(action_seq)
+        else:
+            action_en = self.CLIP.proj_a(action)
         curr_za = self.CLIP.project_sa(z_a, action_en) 
         logits = self.CLIP.compute_logits(curr_za, next_z)
         labels = torch.arange(logits.shape[0]).long().to(self.device)
@@ -344,7 +358,7 @@ class DrQV2Agent:
         
         
         if self.temporal:
-            batch = torch.concat([z_a, action, next_z], dim=-1)
+            batch = torch.concat([z_a, action_en, next_z], dim=-1)
             batch_rev = torch.concat([next_z, action_en, z_a], dim=-1)
             labels = torch.concat([torch.zeros(batch.shape[0]),
                                    torch.ones(batch.shape[0])]
@@ -387,7 +401,7 @@ class DrQV2Agent:
             return metrics
         
         batch = next(replay_iter)
-        obs, action, reward, discount, next_obs, r_next_obs = utils.to_torch(
+        obs, action, action_seq, reward, discount, next_obs, r_next_obs = utils.to_torch(
             batch, self.device)
 
         # augment
@@ -413,8 +427,8 @@ class DrQV2Agent:
                                  self.critic_target_tau)
         
         if self.multistep:
-            metrics.update(self.update_clip(obs, action, next_obs, reward))
+            metrics.update(self.update_clip(obs, action, action_seq, next_obs, reward))
         else:
-            metrics.update(self.update_clip(obs, action, r_next_obs, reward))
+            metrics.update(self.update_clip(obs, action, action_seq, r_next_obs, reward))
         
         return metrics
