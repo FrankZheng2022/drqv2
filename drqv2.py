@@ -79,9 +79,8 @@ class CLIP(nn.Module):
         self.device = device
         
         a_dim = action_shape[0]
-        latent_a_dim = a_dim*multistep
         self.proj_sa = nn.Sequential(
-            nn.Linear(feature_dim + latent_a_dim, hidden_dim), 
+            nn.Linear(feature_dim + a_dim*self.multistep, hidden_dim), 
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, feature_dim)
         )
@@ -92,16 +91,20 @@ class CLIP(nn.Module):
             nn.Linear(hidden_dim, a_dim)
         )
         
+        self.proj_aseq = nn.Sequential(
+            nn.Linear(a_dim*self.multistep, a_dim*self.multistep), 
+            nn.LayerNorm(a_dim*self.multistep), nn.Tanh()
+        )
         self.proj_a = nn.Sequential(
-            nn.Linear(a_dim*self.multistep, latent_a_dim), 
-            nn.LayerNorm(latent_a_dim), nn.Tanh()
+            nn.Linear(a_dim, a_dim), 
+            nn.LayerNorm(a_dim), nn.Tanh()
         )
         
         self.proj_s = nn.Sequential(nn.Linear(repr_dim, feature_dim),
                                    nn.LayerNorm(feature_dim), nn.Tanh())
         
         self.proj_sas = nn.Sequential(
-            nn.Linear(feature_dim*2+latent_a_dim, hidden_dim), 
+            nn.Linear(feature_dim*2+a_dim*self.multistep, hidden_dim), 
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, 2)
         )
@@ -113,7 +116,7 @@ class CLIP(nn.Module):
         )
         
         self.W = nn.Parameter(torch.rand(feature_dim, feature_dim))
-        self.inv_W = nn.Parameter(torch.rand(latent_a_dim, latent_a_dim))
+        self.inv_W = nn.Parameter(torch.rand(a_dim, a_dim))
         self.apply(utils.weight_init)
     
     def encode(self, x, ema=False):
@@ -341,16 +344,17 @@ class DrQV2Agent:
         
         ### Compute loss for consistency
         next_z = self.CLIP.encode(self.aug(next_obs.float()), ema=True)
-        action_en = self.CLIP.proj_a(action_seq)
-        curr_za = self.CLIP.project_sa(z_a, action_en) 
+        action_en = self.CLIP.proj_a(action) ### action encoding
+        action_seq_en = self.CLIP.proj_aseq(action_seq) ### action sequence
+        curr_za = self.CLIP.project_sa(z_a, action_seq_en) 
         logits = self.CLIP.compute_logits(curr_za, next_z)
         labels = torch.arange(logits.shape[0]).long().to(self.device)
         consistency_loss = self.cross_entropy_loss(logits, labels)
         
         
         if self.temporal:
-            batch = torch.concat([z_a, action_en, next_z], dim=-1)
-            batch_rev = torch.concat([next_z, action_en, z_a], dim=-1)
+            batch = torch.concat([z_a, action_seq_en, next_z], dim=-1)
+            batch_rev = torch.concat([next_z, action_seq_en, z_a], dim=-1)
             labels = torch.concat([torch.zeros(batch.shape[0]),
                                    torch.ones(batch.shape[0])]
                                  ).long().to(self.device)
@@ -363,12 +367,15 @@ class DrQV2Agent:
         ### Compute loss for inverse_prediction
         if self.inv:
             pred_action = self.CLIP.project_ss(z_a, next_z)
-            inv_consistency_loss = self.mse_loss(pred_action, action)
+            #inv_consistency_loss = self.mse_loss(pred_action, action)
+            logits = self.CLIP.compute_logits(pred_action, action_en, inv=True)
+            labels = torch.arange(logits.shape[0]).long().to(self.device)
+            inv_consistency_loss = self.cross_entropy_loss(logits, labels)
         else:
             inv_consistency_loss = torch.tensor(0.)
             
         if self.reward:
-            reward_pred = self.CLIP.reward(torch.concat([z_a, action], dim=-1))
+            reward_pred = self.CLIP.reward(torch.concat([z_a, action_en], dim=-1))
             reward_loss = self.mse_loss(reward_pred, reward)
         else:
             reward_loss = torch.tensor(0.)
