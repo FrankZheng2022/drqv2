@@ -79,6 +79,7 @@ class CLIP(nn.Module):
         self.device = device
         
         a_dim = action_shape[0]
+        
         self.proj_sa = nn.Sequential(
             nn.Linear(feature_dim + a_dim*self.multistep, hidden_dim), 
             nn.ReLU(inplace=True),
