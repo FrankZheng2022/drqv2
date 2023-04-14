@@ -149,7 +149,8 @@ class ReplayBuffer(IterableDataset):
         self._samples_since_last_fetch += 1
         episode = self._sample_episode()
         # add +1 for the first dummy transition
-        idx = np.random.randint(0, episode_len(episode) - self._nstep + 1) + 1
+        n_step = max(self._nstep, self._multistep)
+        idx = np.random.randint(0, episode_len(episode) - n_step + 1) + 1
         obs = episode['observation'][idx - 1]
         r_next_obs = episode['observation'][idx + self._multistep - 1]
         action = episode['action'][idx]
@@ -193,6 +194,7 @@ def make_replay_loader(replay_dir, max_size, batch_size, num_workers,
                                          pin_memory=True,
                                          worker_init_fn=_worker_init_fn)
     return loader
+
 
 
 
