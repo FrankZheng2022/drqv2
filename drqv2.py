@@ -79,6 +79,7 @@ class CLIP(nn.Module):
         self.device = device
         
         a_dim = action_shape[0]
+
         self.proj_sa = nn.Sequential(
             nn.Linear(feature_dim + a_dim*multistep, hidden_dim), 
             nn.ReLU(inplace=True),
@@ -91,16 +92,7 @@ class CLIP(nn.Module):
             nn.Linear(hidden_dim, a_dim)
         )
         
-        # self.proj_aseq = nn.Sequential(
-        #     nn.Linear(a_dim*self.multistep, a_dim*self.multistep), 
-        #     nn.LayerNorm(a_dim*self.multistep), nn.Tanh()
-        # )
-        self.act_tok = utils.ActionSeqEncoding(a_dim, device)
-        
-        # self.proj_a = nn.Sequential(
-        #     nn.Linear(a_dim, a_dim), 
-        #     nn.LayerNorm(a_dim), nn.Tanh()
-        # )
+        self.act_tok = utils.ActionEncoding(a_dim, device)
         
         self.proj_s = nn.Sequential(nn.Linear(repr_dim, feature_dim),
                                    nn.LayerNorm(feature_dim), nn.Tanh())
@@ -344,10 +336,12 @@ class DrQV2Agent:
         labels = torch.arange(logits.shape[0]).long().to(self.device)
         curl_loss = self.cross_entropy_loss(logits, labels)
         
-        ### Compute loss for consistency
-        next_z = self.CLIP.encode(self.aug(next_obs.float()), ema=True)
+        ### Compute action encodings
         action_en = self.CLIP.act_tok(action, seq=False) 
         action_seq_en = self.CLIP.act_tok(action_seq, seq=True) 
+        
+        ### Compute loss for consistency
+        next_z = self.CLIP.encode(self.aug(next_obs.float()), ema=True)
         curr_za = self.CLIP.project_sa(z_a, action_seq_en) 
         logits = self.CLIP.compute_logits(curr_za, next_z)
         labels = torch.arange(logits.shape[0]).long().to(self.device)

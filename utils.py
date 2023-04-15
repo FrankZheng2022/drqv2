@@ -14,6 +14,26 @@ from omegaconf import OmegaConf
 from torch import distributions as pyd
 from torch.distributions.utils import _standard_normal
 
+### input shape: (batch_size, length, action_dim)
+### output shape: (batch_size, action_dim)
+class ActionEncoding(nn.Module):
+    def __init__(self, action_dim, device):
+        super().__init__()
+        self.action_dim = action_dim
+        self.action_tokenizer = nn.Sequential(
+            nn.Linear(action_dim, action_dim),
+            nn.LayerNorm(action_dim), nn.Tanh()
+        ).to(device)
+        self.device = device
+        
+    def forward(self, action, seq=False):
+        if seq:
+            action_seq = self.action_tokenizer(action) #(batch_size, length_action_dim)
+            batch_size = action.shape[0]
+            return action_seq.reshape(batch_size, -1)
+        else:
+            return self.action_tokenizer(action)
+
 
 class eval_mode:
     def __init__(self, *models):
@@ -48,6 +68,20 @@ def soft_update_params(net, target_net, tau):
 def to_torch(xs, device):
     return tuple(torch.as_tensor(x, device=device) for x in xs)
 
+def encode_multiple(encoder, xs, detach_lst):
+    length = [x.shape[0] for x in xs]
+    xs, xs_lst = torch.cat(xs, dim=0), []
+    xs = encoder(xs)
+    start = 0
+    for i in range(len(detach_lst)):
+        x = xs[start:start+length[i], :]
+        if detach_lst[i]:
+            x = x.detach()
+        xs_lst.append(x)
+        start += length[i]
+    return xs_lst
+    
+    
 
 def weight_init(m):
     if isinstance(m, nn.Linear):
@@ -147,3 +181,4 @@ def schedule(schdl, step):
                 mix = np.clip((step - duration1) / duration2, 0.0, 1.0)
                 return (1.0 - mix) * final1 + mix * final2
     raise NotImplementedError(schdl)
+
