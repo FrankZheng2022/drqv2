@@ -17,20 +17,25 @@ from torch.distributions.utils import _standard_normal
 ### input shape: (batch_size, length, action_dim)
 ### output shape: (batch_size, action_dim)
 class ActionEncoding(nn.Module):
-    def __init__(self, action_dim, device):
+    def __init__(self, action_dim, latent_action_dim, multistep):
         super().__init__()
         self.action_dim = action_dim
         self.action_tokenizer = nn.Sequential(
-            nn.Linear(action_dim, action_dim),
-            nn.LayerNorm(action_dim), nn.Tanh()
-        ).to(device)
-        self.device = device
+            nn.Linear(action_dim, 64), nn.Tanh()
+            nn.Linear(64, latent_action_dim)
+        )
+        self.action_seq_tokenizer = nn.Sequential(
+            nn.Linear(latent_action_dim*multistep, latent_action_dim*multistep),
+            nn.LayerNorm(latent_action_dim*multistep), nn.Tanh()
+        )
+        self.apply(weight_init)
         
     def forward(self, action, seq=False):
         if seq:
-            action_seq = self.action_tokenizer(action) #(batch_size, length_action_dim)
             batch_size = action.shape[0]
-            return action_seq.reshape(batch_size, -1)
+            action_seq = self.action_tokenizer(action) #(batch_size, length_action_dim)
+            action_seq = action_seq.reshape(batch_size, -1)
+            return self.action_seq_tokenizer(action_seq)
         else:
             return self.action_tokenizer(action)
 
@@ -181,4 +186,5 @@ def schedule(schdl, step):
                 mix = np.clip((step - duration1) / duration2, 0.0, 1.0)
                 return (1.0 - mix) * final1 + mix * final2
     raise NotImplementedError(schdl)
+
 
