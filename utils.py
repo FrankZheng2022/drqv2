@@ -21,7 +21,7 @@ class ActionEncoding(nn.Module):
         super().__init__()
         self.action_dim = action_dim
         self.action_tokenizer = nn.Sequential(
-            nn.Linear(action_dim, 64), nn.Tanh()
+            nn.Linear(action_dim, 64), nn.Tanh(),
             nn.Linear(64, latent_action_dim)
         )
         self.action_seq_tokenizer = nn.Sequential(
