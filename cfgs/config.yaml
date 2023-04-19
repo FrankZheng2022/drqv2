@@ -38,6 +38,7 @@ temporal: false
 multistep: 1
 lars: false
 latent_a_dim: none
+drqv2: false
 
 agent:
   _target_: drqv2.DrQV2Agent
@@ -60,6 +61,7 @@ agent:
   multistep: ${multistep}
   lars: ${lars}
   latent_a_dim: ${latent_a_dim}
+  drqv2: ${drqv2}
 
 
 hydra:

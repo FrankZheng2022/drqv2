@@ -209,7 +209,7 @@ class DrQV2Agent:
     def __init__(self, obs_shape, action_shape, device, lr, encoder_lr, feature_dim,
                  hidden_dim, critic_target_tau, num_expl_steps,
                  update_every_steps, stddev_schedule, stddev_clip, use_tb,
-                 inv, reward, temporal, multistep, lars, latent_a_dim):
+                 inv, reward, temporal, multistep, lars, latent_a_dim, drqv2):
         self.device = device
         self.critic_target_tau = critic_target_tau
         self.update_every_steps = update_every_steps
@@ -223,8 +223,11 @@ class DrQV2Agent:
         self.temporal = temporal
         self.multistep = multistep
         self.lars = lars
+        self.drqv2 = drqv2
 
         # models
+        if latent_a_dim == 'none':
+            latent_a_dim = action_shape[0]
         self.latent_a_dim = latent_a_dim
         self.act_tok = utils.ActionEncoding(action_shape[0], latent_a_dim, multistep)
         self.encoder = Encoder(obs_shape, feature_dim).to(device)
@@ -354,7 +357,8 @@ class DrQV2Agent:
         logits = self.CLIP.compute_logits(curr_za, next_z)
         labels = torch.arange(logits.shape[0]).long().to(self.device)
         consistency_loss = self.cross_entropy_loss(logits, labels)
-        
+        #cos = nn.CosineSimilarity(dim=1)
+        #consistency_loss = torch.mean(cos(curr_za, next_z))
         
         if self.temporal:
             batch = torch.concat([z_a, action_seq_en, next_z], dim=-1)
@@ -428,6 +432,7 @@ class DrQV2Agent:
         utils.soft_update_params(self.critic, self.critic_target,
                                  self.critic_target_tau)
         
-        metrics.update(self.update_clip(obs, action, action_seq, r_next_obs, reward))
+        if not self.drqv2:
+            metrics.update(self.update_clip(obs, action, action_seq, r_next_obs, reward))
         
         return metrics

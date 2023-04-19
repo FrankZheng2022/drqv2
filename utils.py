@@ -33,9 +33,9 @@ class ActionEncoding(nn.Module):
     def forward(self, action, seq=False):
         if seq:
             batch_size = action.shape[0]
-            action_seq = self.action_tokenizer(action) #(batch_size, length_action_dim)
-            action_seq = action_seq.reshape(batch_size, -1)
-            return self.action_seq_tokenizer(action_seq)
+            #action = self.action_tokenizer(action) #(batch_size, length_action_dim)
+            action = action.reshape(batch_size, -1)
+            return self.action_seq_tokenizer(action)
         else:
             return self.action_tokenizer(action)
 
