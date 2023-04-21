@@ -195,8 +195,8 @@ class Critic(nn.Module):
         self.apply(utils.weight_init)
 
     def forward(self, obs, action, act_tok=None):
-        if act_tok is not None:
-            action = act_tok(action)
+        #if act_tok is not None:
+            #action = act_tok(action)
         h = self.trunk(obs)
         h_action = torch.cat([h, action], dim=-1)
         q1 = self.Q1(h_action)
