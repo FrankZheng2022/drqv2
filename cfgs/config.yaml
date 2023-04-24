@@ -37,6 +37,7 @@ reward: true
 temporal: false
 multistep: 1
 lars: false
+drqv2: false
 
 agent:
   _target_: drqv2.DrQV2Agent
@@ -58,6 +59,7 @@ agent:
   temporal: ${temporal}
   multistep: ${multistep}
   lars: ${lars}
+  drqv2: ${drqv2}
 
 
 hydra:
