@@ -22,7 +22,7 @@ batch_size: 256
 # misc
 seed: 1
 device: cuda
-save_video: false
+save_video: true
 save_train_video: false
 use_tb: true
 # experiment
@@ -37,8 +37,6 @@ reward: true
 temporal: false
 multistep: 1
 lars: false
-latent_a_dim: none
-drqv2: false
 
 agent:
   _target_: drqv2.DrQV2Agent
@@ -60,8 +58,6 @@ agent:
   temporal: ${temporal}
   multistep: ${multistep}
   lars: ${lars}
-  latent_a_dim: ${latent_a_dim}
-  drqv2: ${drqv2}
 
 
 hydra:
