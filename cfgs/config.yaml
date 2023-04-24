@@ -37,7 +37,6 @@ reward: true
 temporal: false
 multistep: 1
 lars: false
-latent_a_dim: none
 drqv2: false
 
 agent:
@@ -60,7 +59,6 @@ agent:
   temporal: ${temporal}
   multistep: ${multistep}
   lars: ${lars}
-  latent_a_dim: ${latent_a_dim}
   drqv2: ${drqv2}
 
 

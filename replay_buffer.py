@@ -154,7 +154,7 @@ class ReplayBuffer(IterableDataset):
         obs = episode['observation'][idx - 1]
         r_next_obs = episode['observation'][idx + self._multistep - 1]
         action = episode['action'][idx]
-        action_seq = np.concatenate([episode['action'][idx+i][None, :] for i in range(self._multistep)])
+        action_seq = np.concatenate([episode['action'][idx+i] for i in range(self._multistep)])
         next_obs = episode['observation'][idx + self._nstep - 1]
         reward = np.zeros_like(episode['reward'][idx])
         discount = np.ones_like(episode['discount'][idx])
@@ -194,3 +194,9 @@ def make_replay_loader(replay_dir, max_size, batch_size, num_workers,
                                          pin_memory=True,
                                          worker_init_fn=_worker_init_fn)
     return loader
+
+
+
+
+
+
