@@ -1,3 +1,4 @@
+
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 #
 # This source code is licensed under the MIT license found in the
@@ -9,7 +10,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from lars import LARS
 import utils
-import itertools
 
 
 class RandomShiftsAug(nn.Module):
@@ -72,7 +72,7 @@ class CLIP(nn.Module):
     Constrastive loss
     """
 
-    def __init__(self, repr_dim, feature_dim, action_shape, latent_a_dim, hidden_dim, act_tok, encoder, multistep, device):
+    def __init__(self, repr_dim, feature_dim, action_shape, hidden_dim, encoder, multistep, device):
         super(CLIP, self).__init__()
 
         self.multistep = multistep
@@ -80,9 +80,9 @@ class CLIP(nn.Module):
         self.device = device
         
         a_dim = action_shape[0]
-
+        
         self.proj_sa = nn.Sequential(
-            nn.Linear(feature_dim + latent_a_dim*multistep, hidden_dim), 
+            nn.Linear(feature_dim + a_dim*self.multistep, hidden_dim), 
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, feature_dim)
         )
@@ -93,7 +93,14 @@ class CLIP(nn.Module):
             nn.Linear(hidden_dim, a_dim)
         )
         
-        self.act_tok = act_tok
+        self.proj_aseq = nn.Sequential(
+            nn.Linear(a_dim*self.multistep, a_dim*self.multistep), 
+            nn.LayerNorm(a_dim*self.multistep), nn.Tanh()
+        )
+        self.proj_a = nn.Sequential(
+            nn.Linear(a_dim, a_dim), 
+            nn.LayerNorm(a_dim), nn.Tanh()
+        )
         
         self.proj_s = nn.Sequential(nn.Linear(repr_dim, feature_dim),
                                    nn.LayerNorm(feature_dim), nn.Tanh())
@@ -105,7 +112,7 @@ class CLIP(nn.Module):
         )
         
         self.reward = nn.Sequential(
-            nn.Linear(feature_dim+latent_a_dim, hidden_dim), 
+            nn.Linear(feature_dim+a_dim, hidden_dim), 
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, 1)
         )
@@ -176,27 +183,25 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
-    def __init__(self, repr_dim, latent_a_dim, feature_dim, hidden_dim):
+    def __init__(self, repr_dim, action_shape, feature_dim, hidden_dim):
         super().__init__()
 
         self.trunk = nn.Sequential(nn.Linear(repr_dim, feature_dim),
                                     nn.LayerNorm(feature_dim), nn.Tanh())
 
         self.Q1 = nn.Sequential(
-            nn.Linear(feature_dim + latent_a_dim, hidden_dim),
+            nn.Linear(feature_dim + action_shape[0], hidden_dim),
             nn.ReLU(inplace=True), nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(inplace=True), nn.Linear(hidden_dim, 1))
 
         self.Q2 = nn.Sequential(
-            nn.Linear(feature_dim + latent_a_dim, hidden_dim),
+            nn.Linear(feature_dim + action_shape[0], hidden_dim),
             nn.ReLU(inplace=True), nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(inplace=True), nn.Linear(hidden_dim, 1))
 
         self.apply(utils.weight_init)
 
-    def forward(self, obs, action, act_tok=None):
-        if act_tok is not None:
-            action = act_tok(action)
+    def forward(self, obs, action):
         h = self.trunk(obs)
         h_action = torch.cat([h, action], dim=-1)
         q1 = self.Q1(h_action)
@@ -209,7 +214,7 @@ class DrQV2Agent:
     def __init__(self, obs_shape, action_shape, device, lr, encoder_lr, feature_dim,
                  hidden_dim, critic_target_tau, num_expl_steps,
                  update_every_steps, stddev_schedule, stddev_clip, use_tb,
-                 inv, reward, temporal, multistep, lars, latent_a_dim, drqv2):
+                 inv, reward, temporal, multistep, lars, drqv2, spr, curl):
         self.device = device
         self.critic_target_tau = critic_target_tau
         self.update_every_steps = update_every_steps
@@ -224,28 +229,23 @@ class DrQV2Agent:
         self.multistep = multistep
         self.lars = lars
         self.drqv2 = drqv2
+        self.spr = spr
+        self.curl = curl
 
         # models
-        if latent_a_dim == 'none':
-            latent_a_dim = action_shape[0]
-        self.latent_a_dim = latent_a_dim
-        self.act_tok = utils.ActionEncoding(action_shape[0], latent_a_dim, multistep)
         self.encoder = Encoder(obs_shape, feature_dim).to(device)
         self.actor = Actor(self.encoder.repr_dim, action_shape, feature_dim,
                            hidden_dim).to(device)
 
-        self.critic = Critic(self.encoder.repr_dim, latent_a_dim, feature_dim,
+        self.critic = Critic(self.encoder.repr_dim, action_shape, feature_dim,
                              hidden_dim).to(device)
-        self.critic_target = Critic(self.encoder.repr_dim, latent_a_dim,
+        self.critic_target = Critic(self.encoder.repr_dim, action_shape,
                                     feature_dim, hidden_dim).to(device)
         self.critic_target.load_state_dict(self.critic.state_dict())
-        self.CLIP = CLIP(self.encoder.repr_dim, feature_dim, action_shape, latent_a_dim, hidden_dim, self.act_tok, self.encoder, multistep, device).to(device)
+        self.CLIP = CLIP(self.encoder.repr_dim, feature_dim, action_shape, hidden_dim, self.encoder, multistep, device).to(device)
         
         # optimizers
-        parameters = itertools.chain(self.encoder.parameters(),
-                                     self.act_tok.parameters(),
-        )
-        self.encoder_opt = torch.optim.Adam(parameters, lr=lr)
+        self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=lr)
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=lr)
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=lr)
         if lars:
@@ -289,11 +289,11 @@ class DrQV2Agent:
             stddev = utils.schedule(self.stddev_schedule, step)
             dist = self.actor(next_obs, stddev)
             next_action = dist.sample(clip=self.stddev_clip)
-            target_Q1, target_Q2 = self.critic_target(next_obs, next_action, self.act_tok)
+            target_Q1, target_Q2 = self.critic_target(next_obs, next_action)
             target_V = torch.min(target_Q1, target_Q2)
             target_Q = reward + (discount * target_V)
 
-        Q1, Q2 = self.critic(obs, action, self.act_tok)
+        Q1, Q2 = self.critic(obs, action)
         critic_loss = F.mse_loss(Q1, target_Q) + F.mse_loss(Q2, target_Q)
 
         if self.use_tb:
@@ -318,7 +318,7 @@ class DrQV2Agent:
         dist = self.actor(obs, stddev)
         action = dist.sample(clip=self.stddev_clip)
         log_prob = dist.log_prob(action).sum(-1, keepdim=True)
-        Q1, Q2 = self.critic(obs, action, self.act_tok)
+        Q1, Q2 = self.critic(obs, action)
         Q = torch.min(Q1, Q2)
 
         actor_loss = -Q.mean()
@@ -343,22 +343,25 @@ class DrQV2Agent:
         z_a = self.CLIP.encode(obs_anchor)
         z_pos = self.CLIP.encode(obs_pos, ema=True)
         ### Compute the original loss for CURL
-        logits = self.CLIP.compute_logits(z_a, z_pos)
-        labels = torch.arange(logits.shape[0]).long().to(self.device)
-        curl_loss = self.cross_entropy_loss(logits, labels)
-        
-        ### Compute action encodings
-        action_en = self.CLIP.act_tok(action, seq=False) 
-        action_seq_en = self.CLIP.act_tok(action_seq, seq=True) 
+        if self.curl:
+            logits = self.CLIP.compute_logits(z_a, z_pos)
+            labels = torch.arange(logits.shape[0]).long().to(self.device)
+            curl_loss = self.cross_entropy_loss(logits, labels)
+        else:
+            curl_loss = torch.tensor(0.)
         
         ### Compute loss for consistency
         next_z = self.CLIP.encode(self.aug(next_obs.float()), ema=True)
+        action_en = self.CLIP.proj_a(action) ### action encoding
+        action_seq_en = self.CLIP.proj_aseq(action_seq) ### action sequence
         curr_za = self.CLIP.project_sa(z_a, action_seq_en) 
         logits = self.CLIP.compute_logits(curr_za, next_z)
         labels = torch.arange(logits.shape[0]).long().to(self.device)
-        consistency_loss = self.cross_entropy_loss(logits, labels)
-        #cos = nn.CosineSimilarity(dim=1)
-        #consistency_loss = torch.mean(cos(curr_za, next_z))
+        if not self.spr:
+            consistency_loss = self.cross_entropy_loss(logits, labels)
+        else:
+            cos = nn.CosineSimilarity(dim=1)
+            consistency_loss = torch.mean(cos(curr_za, next_z))
         
         if self.temporal:
             batch = torch.concat([z_a, action_seq_en, next_z], dim=-1)
