@@ -37,7 +37,6 @@ reward: true
 temporal: false
 multistep: 1
 lars: false
-latent_a_dim: none
 drqv2: false
 spr: false
 curl: true
