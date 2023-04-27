@@ -29,7 +29,7 @@ use_tb: false
 experiment: exp
 # agent
 lr: 1e-4
-encoder_lr: 2e-4
+encoder_lr: 1e-4
 feature_dim: 50
 exp_name: default
 inv: false
