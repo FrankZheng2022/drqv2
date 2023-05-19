@@ -1,4 +1,3 @@
-
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 #
 # This source code is licensed under the MIT license found in the
@@ -8,8 +7,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from lars import LARS
 import utils
+import itertools
 
 
 class RandomShiftsAug(nn.Module):
@@ -67,58 +66,38 @@ class Encoder(nn.Module):
         h = h.view(h.shape[0], -1)
         return h
 
-class CLIP(nn.Module):
+class TACO(nn.Module):
     """
-    Constrastive loss
+    TACO Constrastive loss
     """
 
-    def __init__(self, repr_dim, feature_dim, action_shape, hidden_dim, encoder, multistep, device):
-        super(CLIP, self).__init__()
+    def __init__(self, repr_dim, feature_dim, action_shape, latent_a_dim, hidden_dim, act_tok, encoder, multistep, device):
+        super(TACO, self).__init__()
 
         self.multistep = multistep
         self.encoder = encoder
         self.device = device
         
         a_dim = action_shape[0]
-        
+
         self.proj_sa = nn.Sequential(
-            nn.Linear(feature_dim + a_dim*self.multistep, hidden_dim), 
+            nn.Linear(feature_dim + latent_a_dim*multistep, hidden_dim), 
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, feature_dim)
         )
         
-        self.proj_ss = nn.Sequential(
-            nn.Linear(feature_dim*2, hidden_dim), 
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, a_dim)
-        )
-        
-        self.proj_aseq = nn.Sequential(
-            nn.Linear(a_dim*self.multistep, a_dim*self.multistep), 
-            nn.LayerNorm(a_dim*self.multistep), nn.Tanh()
-        )
-        self.proj_a = nn.Sequential(
-            nn.Linear(a_dim, a_dim), 
-            nn.LayerNorm(a_dim), nn.Tanh()
-        )
+        self.act_tok = act_tok
         
         self.proj_s = nn.Sequential(nn.Linear(repr_dim, feature_dim),
                                    nn.LayerNorm(feature_dim), nn.Tanh())
         
-        self.proj_sas = nn.Sequential(
-            nn.Linear(feature_dim*2+a_dim*self.multistep, hidden_dim), 
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, 2)
-        )
-        
         self.reward = nn.Sequential(
-            nn.Linear(feature_dim+a_dim, hidden_dim), 
+            nn.Linear(feature_dim+latent_a_dim*multistep, hidden_dim), 
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, 1)
         )
         
         self.W = nn.Parameter(torch.rand(feature_dim, feature_dim))
-        self.inv_W = nn.Parameter(torch.rand(a_dim, a_dim))
         self.apply(utils.weight_init)
     
     def encode(self, x, ema=False):
@@ -137,12 +116,8 @@ class CLIP(nn.Module):
     def project_sa(self, s, a):
         x = torch.concat([s,a], dim=-1)
         return self.proj_sa(x)
-    
-    def project_ss(self, s, next_s):
-        x = torch.concat([s, next_s], dim=-1)
-        return self.proj_ss(x)
         
-    def compute_logits(self, z_a, z_pos, inv=False):
+    def compute_logits(self, z_a, z_pos):
         """
         - compute (B,B) matrix z_a (W z_pos.T)
         - positives are all diagonal elements
@@ -150,8 +125,7 @@ class CLIP(nn.Module):
         - to compute loss use multiclass cross entropy with identity matrix for labels
         """
         
-        W  = self.inv_W if inv else self.W
-        Wz = torch.matmul(W, z_pos.T)  # (z_dim,B)
+        Wz = torch.matmul(self.W, z_pos.T)  # (z_dim,B)
         logits = torch.matmul(z_a, Wz)  # (B,B)
         logits = logits - torch.max(logits, 1)[0][:, None]
         return logits
@@ -183,25 +157,27 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
-    def __init__(self, repr_dim, action_shape, feature_dim, hidden_dim):
+    def __init__(self, repr_dim, latent_a_dim, feature_dim, hidden_dim):
         super().__init__()
 
         self.trunk = nn.Sequential(nn.Linear(repr_dim, feature_dim),
                                     nn.LayerNorm(feature_dim), nn.Tanh())
 
         self.Q1 = nn.Sequential(
-            nn.Linear(feature_dim + action_shape[0], hidden_dim),
+            nn.Linear(feature_dim + latent_a_dim, hidden_dim),
             nn.ReLU(inplace=True), nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(inplace=True), nn.Linear(hidden_dim, 1))
 
         self.Q2 = nn.Sequential(
-            nn.Linear(feature_dim + action_shape[0], hidden_dim),
+            nn.Linear(feature_dim + latent_a_dim, hidden_dim),
             nn.ReLU(inplace=True), nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(inplace=True), nn.Linear(hidden_dim, 1))
 
         self.apply(utils.weight_init)
 
-    def forward(self, obs, action):
+    def forward(self, obs, action, act_tok=None):
+        if act_tok is not None:
+            action = act_tok(action)
         h = self.trunk(obs)
         h_action = torch.cat([h, action], dim=-1)
         q1 = self.Q1(h_action)
@@ -214,7 +190,7 @@ class DrQV2Agent:
     def __init__(self, obs_shape, action_shape, device, lr, encoder_lr, feature_dim,
                  hidden_dim, critic_target_tau, num_expl_steps,
                  update_every_steps, stddev_schedule, stddev_clip, use_tb,
-                 inv, reward, temporal, multistep, lars, drqv2):
+                 reward, multistep, latent_a_dim, drqv2, spr, curl, taco):
         self.device = device
         self.critic_target_tau = critic_target_tau
         self.update_every_steps = update_every_steps
@@ -223,33 +199,37 @@ class DrQV2Agent:
         self.stddev_schedule = stddev_schedule
         self.stddev_clip = stddev_clip
         
-        self.inv = inv 
         self.reward = reward
-        self.temporal = temporal
         self.multistep = multistep
-        self.lars = lars
         self.drqv2 = drqv2
+        self.spr  = spr
+        self.curl = curl
+        self.taco = taco
 
         # models
+        if latent_a_dim == 'none':
+            latent_a_dim = action_shape[0]
+        self.latent_a_dim = latent_a_dim
+        self.act_tok = utils.ActionEncoding(action_shape[0], latent_a_dim, multistep)
         self.encoder = Encoder(obs_shape, feature_dim).to(device)
         self.actor = Actor(self.encoder.repr_dim, action_shape, feature_dim,
                            hidden_dim).to(device)
 
-        self.critic = Critic(self.encoder.repr_dim, action_shape, feature_dim,
+        self.critic = Critic(self.encoder.repr_dim, latent_a_dim, feature_dim,
                              hidden_dim).to(device)
-        self.critic_target = Critic(self.encoder.repr_dim, action_shape,
+        self.critic_target = Critic(self.encoder.repr_dim, latent_a_dim,
                                     feature_dim, hidden_dim).to(device)
         self.critic_target.load_state_dict(self.critic.state_dict())
-        self.CLIP = CLIP(self.encoder.repr_dim, feature_dim, action_shape, hidden_dim, self.encoder, multistep, device).to(device)
+        self.TACO = TACO(self.encoder.repr_dim, feature_dim, action_shape, latent_a_dim, hidden_dim, self.act_tok, self.encoder, multistep, device).to(device)
         
         # optimizers
-        self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=lr)
+        parameters = itertools.chain(self.encoder.parameters(),
+                                     self.act_tok.parameters(),
+        )
+        self.encoder_opt = torch.optim.Adam(parameters, lr=lr)
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=lr)
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=lr)
-        if lars:
-            self.clip_opt = LARS(self.CLIP.parameters(), lr=encoder_lr, momentum=0.9)
-        else:
-            self.clip_opt = torch.optim.Adam(self.CLIP.parameters(), lr=encoder_lr)
+        self.taco_opt = torch.optim.Adam(self.TACO.parameters(), lr=encoder_lr)
         
         self.cross_entropy_loss = nn.CrossEntropyLoss()
         self.mse_loss = nn.MSELoss()
@@ -265,7 +245,7 @@ class DrQV2Agent:
         self.encoder.train(training)
         self.actor.train(training)
         self.critic.train(training)
-        self.CLIP.train()
+        self.TACO.train()
 
     def act(self, obs, step, eval_mode):
         obs = torch.as_tensor(obs, device=self.device)
@@ -287,11 +267,11 @@ class DrQV2Agent:
             stddev = utils.schedule(self.stddev_schedule, step)
             dist = self.actor(next_obs, stddev)
             next_action = dist.sample(clip=self.stddev_clip)
-            target_Q1, target_Q2 = self.critic_target(next_obs, next_action)
+            target_Q1, target_Q2 = self.critic_target(next_obs, next_action, self.act_tok)
             target_V = torch.min(target_Q1, target_Q2)
             target_Q = reward + (discount * target_V)
 
-        Q1, Q2 = self.critic(obs, action)
+        Q1, Q2 = self.critic(obs, action, self.act_tok)
         critic_loss = F.mse_loss(Q1, target_Q) + F.mse_loss(Q2, target_Q)
 
         if self.use_tb:
@@ -316,7 +296,7 @@ class DrQV2Agent:
         dist = self.actor(obs, stddev)
         action = dist.sample(clip=self.stddev_clip)
         log_prob = dist.log_prob(action).sum(-1, keepdim=True)
-        Q1, Q2 = self.critic(obs, action)
+        Q1, Q2 = self.critic(obs, action, self.act_tok)
         Q = torch.min(Q1, Q2)
 
         actor_loss = -Q.mean()
@@ -333,65 +313,52 @@ class DrQV2Agent:
 
         return metrics
     
-    def update_clip(self, obs, action, action_seq, next_obs, reward):
+    def update_taco(self, obs, action, action_seq, next_obs, reward):
         metrics = dict()
         
         obs_anchor = self.aug(obs.float())
         obs_pos = self.aug(obs.float())
-        z_a = self.CLIP.encode(obs_anchor)
-        z_pos = self.CLIP.encode(obs_pos, ema=True)
+        z_a = self.TACO.encode(obs_anchor)
+        z_pos = self.TACO.encode(obs_pos, ema=True)
         ### Compute the original loss for CURL
-        logits = self.CLIP.compute_logits(z_a, z_pos)
-        labels = torch.arange(logits.shape[0]).long().to(self.device)
-        curl_loss = self.cross_entropy_loss(logits, labels)
+        if self.curl:
+            logits = self.TACO.compute_logits(z_a, z_pos)
+            labels = torch.arange(logits.shape[0]).long().to(self.device)
+            curl_loss = self.cross_entropy_loss(logits, labels)
+        else:
+            curl_loss = torch.tensor(0.)
+        
+        ### Compute action encodings
+        action_en = self.TACO.act_tok(action, seq=False) 
+        action_seq_en = self.TACO.act_tok(action_seq, seq=True) 
         
         ### Compute loss for consistency
-        next_z = self.CLIP.encode(self.aug(next_obs.float()), ema=True)
-        action_en = self.CLIP.proj_a(action) ### action encoding
-        action_seq_en = self.CLIP.proj_aseq(action_seq) ### action sequence
-        curr_za = self.CLIP.project_sa(z_a, action_seq_en) 
-        logits = self.CLIP.compute_logits(curr_za, next_z)
-        labels = torch.arange(logits.shape[0]).long().to(self.device)
-        consistency_loss = self.cross_entropy_loss(logits, labels)
-        
-        
-        if self.temporal:
-            batch = torch.concat([z_a, action_seq_en, next_z], dim=-1)
-            batch_rev = torch.concat([next_z, action_seq_en, z_a], dim=-1)
-            labels = torch.concat([torch.zeros(batch.shape[0]),
-                                   torch.ones(batch.shape[0])]
-                                 ).long().to(self.device)
-            batch  = torch.concat([batch, batch_rev], dim=0)
-            logits = self.CLIP.proj_sas(batch)
-            temporal_loss = self.cross_entropy_loss(logits, labels)
-        else:
-            temporal_loss = torch.tensor(0.)
-        
-        ### Compute loss for inverse_prediction
-        if self.inv:
-            pred_action = self.CLIP.project_ss(z_a, next_z)
-            #inv_consistency_loss = self.mse_loss(pred_action, action)
-            logits = self.CLIP.compute_logits(pred_action, action_en, inv=True)
+        if self.taco:
+            next_z = self.TACO.encode(self.aug(next_obs.float()), ema=True)
+            curr_za = self.TACO.project_sa(z_a, action_seq_en) 
+            logits = self.TACO.compute_logits(curr_za, next_z)
             labels = torch.arange(logits.shape[0]).long().to(self.device)
-            inv_consistency_loss = self.cross_entropy_loss(logits, labels)
+            if not self.spr:
+                consistency_loss = self.cross_entropy_loss(logits, labels)
+            else:
+                cos = nn.CosineSimilarity(dim=1)
+                consistency_loss = torch.mean(cos(curr_za, next_z))
         else:
-            inv_consistency_loss = torch.tensor(0.)
+            consistency_loss = torch.tensor(0.)
             
         if self.reward:
-            reward_pred = self.CLIP.reward(torch.concat([z_a, action_en], dim=-1))
+            reward_pred = self.TACO.reward(torch.concat([z_a, action_seq_en], dim=-1))
             reward_loss = self.mse_loss(reward_pred, reward)
         else:
             reward_loss = torch.tensor(0.)
             
-        self.clip_opt.zero_grad()
-        (inv_consistency_loss + consistency_loss + curl_loss + reward_loss + temporal_loss).backward()
-        self.clip_opt.step()
+        self.taco_opt.zero_grad()
+        (consistency_loss + curl_loss + reward_loss).backward()
+        self.taco_opt.step()
         if self.use_tb:
             metrics['curl_loss'] = curl_loss.item()
             metrics['fwd_loss']  = consistency_loss.item()
             metrics['reward_loss']  = reward_loss.item()
-            metrics['temporal_loss']  = temporal_loss.item()
-            metrics['inv_loss']  = inv_consistency_loss.item()
         return metrics
         
         
@@ -428,6 +395,6 @@ class DrQV2Agent:
                                  self.critic_target_tau)
         
         if not self.drqv2:
-            metrics.update(self.update_clip(obs, action, action_seq, r_next_obs, reward))
+            metrics.update(self.update_taco(obs, action, action_seq, r_next_obs, reward))
         
         return metrics
