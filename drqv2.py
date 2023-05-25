@@ -209,8 +209,10 @@ class DrQV2Agent:
         # models
         if latent_a_dim == 'none':
             latent_a_dim = action_shape[0]
-        self.latent_a_dim = latent_a_dim
-        self.act_tok = utils.ActionEncoding(action_shape[0], latent_a_dim, multistep)
+            self.act_tok = nn.Identity()
+        else:
+            self.latent_a_dim = latent_a_dim
+            self.act_tok = utils.ActionEncoding(action_shape[0], latent_a_dim, multistep)
         self.encoder = Encoder(obs_shape, feature_dim).to(device)
         self.actor = Actor(self.encoder.repr_dim, action_shape, feature_dim,
                            hidden_dim).to(device)
