@@ -39,6 +39,7 @@ spr: false
 curl: true
 taco: true
 latent_a_dim: none
+encoder_dir: none
 
 agent:
   _target_: drqv2.DrQV2Agent

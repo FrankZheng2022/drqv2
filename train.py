@@ -202,7 +202,17 @@ class Workspace:
             payload = torch.load(f)
         for k, v in payload.items():
             self.__dict__[k] = v
-
+            
+    def load_encoder(self, encoder_dir):
+        #snapshot = self.work_dir / 'snapshot.pt'
+        encoder_dir = Path(encoder_dir)
+        with encoder_dir.open('rb') as f:
+            payload = torch.load(f)
+        self.__dict__['agent'].encoder.load_state_dict(payload['agent'].encoder.state_dict())
+        try:
+            self.__dict__['agent'].act_tok.load_state_dict(payload['agent'].act_tok.state_dict())
+        except:
+            print('Action Encoder not Loaded')
 
 @hydra.main(config_path='cfgs', config_name='config')
 def main(cfg):
@@ -213,6 +223,8 @@ def main(cfg):
     if snapshot.exists():
         print(f'resuming: {snapshot}')
         workspace.load_snapshot()
+    if cfg.encoder_dir != 'none':
+        workspace.load_encoder(cfg.encoder_dir)
     workspace.train()
 
 

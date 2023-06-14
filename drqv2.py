@@ -373,6 +373,9 @@ class DrQV2Agent:
         batch = next(replay_iter)
         obs, action, action_seq, reward, discount, next_obs, r_next_obs = utils.to_torch(
             batch, self.device)
+        
+        if not self.drqv2:
+            metrics.update(self.update_taco(obs, action, action_seq, r_next_obs, reward))
 
         # augment
         obs_en = self.aug(obs.float())
@@ -395,8 +398,5 @@ class DrQV2Agent:
         # update critic target
         utils.soft_update_params(self.critic, self.critic_target,
                                  self.critic_target_tau)
-        
-        if not self.drqv2:
-            metrics.update(self.update_taco(obs, action, action_seq, r_next_obs, reward))
         
         return metrics

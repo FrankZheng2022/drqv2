@@ -33,11 +33,12 @@ class ActionEncoding(nn.Module):
     def forward(self, action, seq=False):
         if seq:
             batch_size = action.shape[0]
-            #action = self.action_tokenizer(action) #(batch_size, length_action_dim)
+            action = self.action_tokenizer(action) #(batch_size, length_action_dim)
             action = action.reshape(batch_size, -1)
             return self.action_seq_tokenizer(action)
         else:
             return self.action_tokenizer(action)
+
 
 
 class eval_mode:
@@ -69,7 +70,11 @@ def soft_update_params(net, target_net, tau):
         target_param.data.copy_(tau * param.data +
                                 (1 - tau) * target_param.data)
 
+def expectile_loss(diff, expectile=0.8):
+    weight = torch.where(diff > 0, expectile, (1 - expectile))
+    return weight * (diff**2)
 
+        
 def to_torch(xs, device):
     return tuple(torch.as_tensor(x, device=device) for x in xs)
 

@@ -93,6 +93,8 @@ class ReplayBuffer(IterableDataset):
         self._samples_since_last_fetch = fetch_every
         self._save_snapshot = save_snapshot
         self._multistep = multistep
+        print('Loading Data into CPU Memory')
+        self._preload()
 
     def _sample_episode(self):
         eps_fn = random.choice(self._episode_fns)
@@ -140,6 +142,10 @@ class ReplayBuffer(IterableDataset):
             if not self._store_episode(eps_fn):
                 break
     
+    def _preload(self):
+        eps_fns = sorted(self._replay_dir.glob('*.npz'), reverse=True)
+        for eps_fn in eps_fns:
+            self._store_episode(eps_fn)
     
     def _sample(self):
         try:
@@ -154,7 +160,7 @@ class ReplayBuffer(IterableDataset):
         obs = episode['observation'][idx - 1]
         r_next_obs = episode['observation'][idx + self._multistep - 1]
         action = episode['action'][idx]
-        action_seq = np.concatenate([episode['action'][idx+i] for i in range(self._multistep)])
+        action_seq = np.concatenate([episode['action'][idx+i][None, :] for i in range(self._multistep)])
         next_obs = episode['observation'][idx + self._nstep - 1]
         reward = np.zeros_like(episode['reward'][idx])
         discount = np.ones_like(episode['discount'][idx])
@@ -178,7 +184,7 @@ def _worker_init_fn(worker_id):
 def make_replay_loader(replay_dir, max_size, batch_size, num_workers,
                        save_snapshot, nstep, multistep, discount):
     max_size_per_worker = max_size // max(1, num_workers)
-
+    
     iterable = ReplayBuffer(replay_dir,
                             max_size_per_worker,
                             num_workers,
