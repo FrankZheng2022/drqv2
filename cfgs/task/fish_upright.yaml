@@ -2,4 +2,4 @@ defaults:
   - medium
   - _self_
 
-task_name: swimmer_swimmer15
+task_name: fish_upright
